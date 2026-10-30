@@ -1,14 +1,15 @@
 Subject: [PATCH] rockchip: add NanoPi Zero2 board support
 
 diff --git a/target/linux/rockchip/armv8/base-files/etc/board.d/02_network b/target/linux/rockchip/armv8/base-files/etc/board.d/02_network
-index 3335af7..999d78f 100644
+index 3335af7..a6b7f1e 100644
 --- a/target/linux/rockchip/armv8/base-files/etc/board.d/02_network
 +++ b/target/linux/rockchip/armv8/base-files/etc/board.d/02_network
-@@ -7,6 +7,9 @@ rockchip_setup_interfaces()
+@@ -7,6 +7,10 @@ rockchip_setup_interfaces()
  	local board="$1"
  
  	case "$board" in
 +	friendlyarm,nanopi-zero2)
++		ucidef_set_interface 'lan' protocol 'static'
 +		ucidef_set_interface_wan 'eth0'
 +		;;
  	armsom,sige7|\

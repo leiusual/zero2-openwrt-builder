@@ -6,7 +6,7 @@
 
 在官方源码上直接加入三份补丁，校验值见 [patches/SHA256SUMS](patches/SHA256SUMS)：
 
-1. **板级适配**：回移 Linux 的 Zero2 DTS 和 OpenWrt LED 别名，添加标准镜像定义及 `02_network` 板型分支，唯一的 `eth0` 作为 DHCP WAN。DTS 回移来源为 [OpenWrt PR #22707](https://github.com/openwrt/openwrt/pull/22707) 的固定提交；镜像直接指定 Zero2 专用 U-Boot。
+1. **板级适配**：回移 Linux 的 Zero2 DTS 和 OpenWrt LED 别名，添加标准镜像定义及 `02_network` 板型分支，唯一的 `eth0` 作为 DHCP WAN；声明不带有线设备或端口的静态 LAN，供官方脚本启用 LAN DHCP 服务。DTS 回移来源为 [OpenWrt PR #22707](https://github.com/openwrt/openwrt/pull/22707) 的固定提交；镜像直接指定 Zero2 专用 U-Boot。
 2. **专用 U-Boot**：回移上游 [`ebf46b588f43`](https://github.com/u-boot/u-boot/commit/ebf46b588f43ffcff7b92b341a7a567a705a8c60) 的 Zero2 defconfig、板级 DTS 和供电初始化设置，接入 OpenWrt `uboot-rockchip`。沿用官方 U-Boot 2025.10，以及 rkbin 的 `rk3528_ddr_1056MHz_v1.11.bin` 和 `rk3528_bl31_v1.20.elf`。旧版 U-Boot 公共 DTS 尚无 GPU 节点，因此只在 U-Boot DTS 中省去该引用。
 3. **启动修复**：保留 [PR #22706](https://github.com/openwrt/openwrt/pull/22706) 的电源域 workaround，合并必要的注册错误处理。idle-only 域保持开启；允许其他域在个别域延迟探测时注册；检查 `pm_genpd_init()` 返回值，全部延迟时重试。
 
@@ -16,7 +16,8 @@
 Wi-Fi 使用官方 OpenWrt 的 `kmod-rtw88-8822ce`、`rtl8822ce-firmware` 和 `wpad-basic-mbedtls`。
 软件选择见 [openwrt.config](openwrt.config)，包括英文 LuCI HTTPS、WireGuard 及 LuCI 协议支持、dig。
 
-默认设置按照[官方 UCI defaults 文档](https://openwrt.org/docs/guide-developer/uci-defaults)，
+默认设置参考[官方 Firmware Selector](https://firmware-selector.openwrt.org/?version=25.12.6) 的首次启动脚本，
+使用[官方 UCI defaults 机制](https://openwrt.org/docs/guide-developer/uci-defaults)，
 直接安装 [99-zero2-defaults](files/etc/uci-defaults/99-zero2-defaults)，增量配置：
 
 | 项目 | 默认值 |
@@ -31,9 +32,12 @@ Wi-Fi 使用官方 OpenWrt 的 `kmod-rtw88-8822ce`、`rtl8822ce-firmware` 和 `w
 | DHCP / 防火墙 | 沿用官方 LAN / WAN 默认策略 |
 | root 密码 | 沿用官方初始空密码 |
 
-脚本由官方 `boot` 服务执行，成功后删除，失败则保留下次启动重试。
-初始化成功后写入 `system.@system[0].zero2_defaults_version=1`；后续保留配置升级会保留用户设置。
-首次迁入本项目应使用全新刷写或不保留配置；旧固件没有此标记，保留配置迁入时也会执行一次默认设置。
+脚本按固定顺序直接设置系统、LAN/WAN 和 Wi-Fi，不检测硬件运行状态，不使用初始化完成标记。
+系统和网络先保存，无线配置写入失败不会跳过前面的设置；日志位于 `/tmp/zero2-setup.log`。
+脚本由官方 `boot` 服务执行，成功后删除，UCI 写入失败则按官方机制保留至下次启动。
+保留配置升级也会重新应用表中的指定值；首次迁入本项目使用全新刷写或不保留配置。
+使用官方 `CONFIG_TARGET_PREINIT_DISABLE_FAILSAFE=y` 关闭 OpenWrt failsafe，且不指定 preinit 网口。
+启动早期不会给 `eth0` 设置临时恢复地址；正常启动后它只作为 DHCP WAN。启动失败也不会将其切换为 LAN，恢复可重新写入 SD 卡。
 没有自定义 preinit 钩子，也不从 `board.d` 动态复制脚本。
 
 在 GitHub **Actions → Build Zero2 → Run workflow** 手动构建。
@@ -42,7 +46,7 @@ Wi-Fi 使用官方 OpenWrt 的 `kmod-rtw88-8822ce`、`rtl8822ce-firmware` 和 `w
 整卡写入会包含 U-Boot；分区布局相同的常规 sysupgrade 通常只更新分区，不更新分区前的引导区。
 
 构建会验证包清单、镜像 SHA256、LBA 64 的 Zero2 U-Boot 内容，并在镜像根文件系统中运行真实 UCI 初始化回归检查。
-检查覆盖空桥、WAN 主机名参数、Wi-Fi 默认值、保留配置升级和失败重试。
+检查执行镜像自带的完整 `uci-defaults` 序列，覆盖 LAN DHCP 服务、空桥、WAN 主机名参数、Wi-Fi 默认值、升级重应用，以及启动期间不启用有线恢复网络。
 测试使用模拟的已检测无线设备配置；硬件启动和无线连接仍需实机验收。
 `zero2-build-logs` 保存本次源码差异、配置、构建及验证日志；工作流只上传 Artifacts。
 
