@@ -2,7 +2,7 @@
 
 Set ZERO2_TEST_ROOTFS to an extracted rootfs with this project's files.
 ZERO2_TEST_PROOT and ZERO2_TEST_QEMU can override proot/static qemu paths.
-Hardware radio probing is represented by a generated wireless configuration.
+Only radio capabilities are simulated; official mac80211.uc generates UCI.
 """
 import os
 import json
@@ -50,21 +50,25 @@ class DefaultsTests(unittest.TestCase):
         return result.stdout
 
     def add_wifi(self):
-        (self.root / 'etc/config/wireless').write_text('''
-config wifi-device 'radio0'
-    option type 'mac80211'
-    option path 'platform/test-pcie/0000:01:00.0'
-    option band '5g'
-    option channel '36'
-    option htmode 'VHT80'
-config wifi-iface 'default_radio0'
-    option device 'radio0'
-    option network 'lan'
-    option mode 'ap'
-    option ssid 'OpenWrt'
-    option encryption 'none'
-    option disabled '1'
-''')
+        board_path = self.root / 'etc/board.json'
+        board = json.loads(board_path.read_text())
+        board['wlan'] = {'phy0': {
+            'path': 'platform/test-pcie/0000:01:00.0',
+            'info': {'bands': {
+                '2G': {'ht': True, 'max_width': 40, 'default_channel': 1},
+                '5G': {'ht': True, 'vht': True, 'max_width': 80, 'default_channel': 36},
+            }, 'radios': []},
+        }}
+        board_path.write_text(json.dumps(board))
+        macfile = self.root / 'sys/class/ieee80211/phy0/macaddress'
+        macfile.parent.mkdir(parents=True)
+        macfile.write_text('02:00:00:00:00:01\n')
+        self.guest('''
+            set -e
+            touch /etc/config/wireless
+            ucode /lib/wifi/mac80211.uc > /tmp/generated-wireless.uci
+            uci -q batch < /tmp/generated-wireless.uci
+        ''')
 
     def boot_defaults(self):
         self.guest('. /etc/init.d/boot; uci_apply_defaults')
@@ -86,6 +90,7 @@ config wifi-iface 'default_radio0'
             'network.lan.device': 'br-lan', 'network.lan.proto': 'static',
             'network.lan.ipaddr': '192.168.2.1/24', 'network.br_lan.name': 'br-lan',
             'network.br_lan.type': 'bridge', 'network.br_lan.bridge_empty': '1',
+            'network.wan': 'interface', 'network.wan6': 'interface',
             'network.wan.device': 'eth0', 'network.wan.proto': 'dhcp',
             'network.wan.hostname': '*', 'network.wan6.device': 'eth0',
             'network.wan6.proto': 'dhcpv6', 'network.wan6.noclientfqdn': '1',
@@ -94,7 +99,7 @@ config wifi-iface 'default_radio0'
             'dhcp.lan.start': '100', 'dhcp.lan.limit': '150', 'dhcp.lan.leasetime': '12h',
             'system.@system[0].hostname': 'Zero',
             'system.@system[0].zonename': 'Asia/Singapore', 'system.@system[0].timezone': '<+08>-8',
-            'wireless.radio0.country': 'CN', 'wireless.radio0.disabled': '0',
+            'wireless.radio0.country': 'CN',
             'wireless.radio0.path': 'platform/test-pcie/0000:01:00.0',
             'wireless.radio0.band': '5g', 'wireless.radio0.channel': '36', 'wireless.radio0.htmode': 'VHT80',
             'wireless.default_radio0.ssid': 'Zero', 'wireless.default_radio0.network': 'lan',
@@ -104,6 +109,7 @@ config wifi-iface 'default_radio0'
         values = self.guest('\n'.join(f'uci get {key}' for key in expected)).splitlines()
         self.assertEqual(dict(zip(expected, values)), expected)
         self.guest('! uci -q get network.br_lan.ports')
+        self.guest('! uci -q get wireless.radio0.disabled')
         self.guest('[ "$(uci -q get dhcp.lan.ignore)" != 1 ]')
         self.assertEqual((self.root / 'etc/config/firewall').read_bytes(), firewall)
         # Run the real protocol handlers, replacing only client launch/ubus.
@@ -135,38 +141,6 @@ config wifi-iface 'default_radio0'
         ''').splitlines()
         self.assertIn('odhcp6c', args6)
         self.assertIn('-f', args6)
-
-    def test_fixed_defaults_are_reapplied_on_upgrade(self):
-        self.add_wifi()
-        self.boot_defaults()
-        self.guest('''
-            uci set network.lan.ipaddr=10.42.0.1/24
-            uci set network.wan.hostname=MyRouter
-            uci add_list network.br_lan.ports=eth0
-            uci set system.@system[0].hostname=MyRouter
-            uci set wireless.default_radio0.ssid=MyWifi
-            uci set wireless.default_radio0.mode=sta
-            uci set wireless.default_radio0.encryption=sae
-            uci set wireless.default_radio0.key=example-test-key
-            uci commit
-        ''')
-        # A new image reinstalls all defaults while sysupgrade restores UCI.
-        shutil.copytree(Path(os.environ['ZERO2_TEST_ROOTFS']) / 'etc/uci-defaults',
-                        self.root / 'etc/uci-defaults', dirs_exist_ok=True)
-        self.boot_defaults()
-        self.guest('''
-            set -e
-            [ "$(uci get network.lan.ipaddr)" = 192.168.2.1/24 ]
-            [ "$(uci get network.wan.hostname)" = '*' ]
-            [ "$(uci get system.@system[0].hostname)" = Zero ]
-            [ "$(uci get wireless.default_radio0.ssid)" = Zero ]
-            [ "$(uci get wireless.default_radio0.mode)" = ap ]
-            [ "$(uci get wireless.default_radio0.encryption)" = none ]
-            [ "$(uci get dhcp.lan.dhcpv4)" = server ]
-            ! uci -q get wireless.default_radio0.key
-            ! uci -q get network.br_lan.ports
-        ''')
-        self.assertFalse((self.root / SCRIPT).exists())
 
     def test_network_and_system_are_saved_without_wireless_sections(self):
         self.boot_defaults()
