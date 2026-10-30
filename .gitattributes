@@ -1,0 +1,2 @@
+# Unified diff context includes leading/trailing spaces by design.
+*.patch -whitespace

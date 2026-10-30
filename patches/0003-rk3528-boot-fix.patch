@@ -1,0 +1,80 @@
+Subject: [PATCH] rockchip: retain tested RK3528 power-domain boot workaround
+
+diff --git a/target/linux/rockchip/patches-6.12/166-rockchip-rk3528-boot-fix.patch b/target/linux/rockchip/patches-6.12/166-rockchip-rk3528-boot-fix.patch
+new file mode 100644
+index 0000000..bdaae53
+--- /dev/null
++++ b/target/linux/rockchip/patches-6.12/166-rockchip-rk3528-boot-fix.patch
+@@ -0,0 +1,72 @@
++From: Daniel Bozeman <daniel@orb.net>
++Subject: [PATCH] pmdomain: rockchip: handle deferred and idle-only domains
++
++Based on OpenWrt PR #22706, commit db2a101856f54afa4bef117bd789a73bae1fe65d.
++Keep idle-only domains always on to avoid inaccessible QoS register access.
++Allow other domains to register when one child's clocks are not ready.
++
++Include local error-handling corrections: check pm_genpd_init(), clear a
++skipped child's error, and defer the provider if no domain registered.
++This retains the tested workaround; skipped domains are not registered
++again after the provider succeeds. It is not a complete power-domain fix.
++
++Signed-off-by: Daniel Bozeman <daniel@orb.net>
++
++--- a/drivers/pmdomain/rockchip/pm-domains.c
+++++ b/drivers/pmdomain/rockchip/pm-domains.c
++@@ -792,9 +792,13 @@
++ 	pd->genpd.flags = GENPD_FLAG_PM_CLK;
++ 	if (pd_info->active_wakeup)
++ 		pd->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
++-	pm_genpd_init(&pd->genpd, NULL,
++-		      !rockchip_pmu_domain_is_on(pd) ||
++-		      (pd->info->mem_status_mask && !rockchip_pmu_domain_is_mem_on(pd)));
+++	if (!pd->info->pwr_mask)
+++		pd->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+++	error = pm_genpd_init(&pd->genpd, NULL,
+++			      !rockchip_pmu_domain_is_on(pd) ||
+++			      (pd->info->mem_status_mask && !rockchip_pmu_domain_is_mem_on(pd)));
+++	if (error)
+++		goto err_unprepare_clocks;
++ 
++ 	pmu->genpd_data.domains[id] = &pd->genpd;
++ 	return 0;
++@@ -914,6 +918,7 @@
++ 	struct device *parent;
++ 	struct rockchip_pmu *pmu;
++ 	const struct rockchip_pmu_info *pmu_info;
+++	bool registered = false;
++ 	int error;
++ 
++ 	if (!np) {
++@@ -971,6 +976,12 @@
++ 	for_each_available_child_of_node_scoped(np, node) {
++ 		error = rockchip_pm_add_one_domain(pmu, node);
++ 		if (error) {
+++			if (error == -EPROBE_DEFER) {
+++				dev_dbg(dev, "skipped node %pOFn, dependencies not yet available\n",
+++					node);
+++				error = 0;
+++				continue;
+++			}
++ 			dev_err(dev, "failed to handle node %pOFn: %d\n",
++ 				node, error);
++ 			goto err_out;
++@@ -982,10 +993,13 @@
++ 				node, error);
++ 			goto err_out;
++ 		}
++-	}
++-
++-	if (error) {
++-		dev_dbg(dev, "no power domains defined\n");
+++		registered = true;
+++	}
+++
+++	if (!registered) {
+++		if (!error)
+++			error = -EPROBE_DEFER;
+++		dev_dbg(dev, "no power domains registered\n");
++ 		goto err_out;
++ 	}
++ 
